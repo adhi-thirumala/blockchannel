@@ -1,6 +1,6 @@
 'use client';
 import Nav from "@/app/nav";
-import { useState, useEffect } from "react"
+import { useState, useEffect, MouseEvent } from "react"
 import React from "react"
 import PostCreationPopup from "./components/PostCreation"
 import PostDisplayPopup from "./components/PostDisplay";
@@ -14,24 +14,21 @@ export default function Page() {
 
   // State for showing/hiding post display popup
   const [displayPostDisplay, setDisplayPostDisplay] = useState(false);
-  const toggleDisplayPostDisplay = () => { setDisplayPostDisplay(!displayPostDisplay); };
+  
+  // Function to display a post
+  function toggleDisplayPostDisplay(post?: AccountData | Post) {
+    if (post) {
+      console.log("Displaying post:", post);
+      setPostToDisplay(post as AccountData);
+    }
+    setDisplayPostDisplay(!displayPostDisplay);
+  }
 
   // State for storing posts
   const [posts, setPosts] = useState<Post[]>([]);
 
-  useEffect(() => {
-    setPosts(GetWalletPDAs);
-    console.log(posts);
-  }, []); // <-- EMPTY DEPENDENCY ARRAY -- runs once on mount
-
-  // Handle new post creation
-  const handlePostCreated = (newPost: Post) => {
-    setPosts(GetWalletPDAs());
-    console.log(posts);
-  };
-
-  // Create a dummy post for display if no posts exist
-  const dummyPost: AccountData = {
+   // Create a dummy post for display if no posts exist
+   const dummyPost: AccountData = {
     title: "Example Title",
     date: "Example Date",
     body: "Example Content",
@@ -39,8 +36,56 @@ export default function Page() {
     votes: 0,
   };
 
-  // Get the post to display - either the first post in the list or a dummy post
-  const postToDisplay = posts.length > 0 ? posts[0] : dummyPost;
+  const [postToDisplay, setPostToDisplay] = useState(dummyPost);
+
+  // Load posts when the component mounts
+  useEffect(() => {
+    const loadedPosts = GetWalletPDAs();
+    console.log("Initial load, posts:", loadedPosts);
+    setPosts(loadedPosts);
+
+    // Set up listener for post updates from blockchain
+    const handlePostsUpdated = (event: CustomEvent<Post[]>) => {
+      console.log("Posts updated from blockchain:", event.detail);
+      setPosts(event.detail);
+    };
+
+    // Add event listener for post updates
+    window.addEventListener('postsUpdated', handlePostsUpdated as EventListener);
+
+    // Clean up the event listener when component unmounts
+    return () => {
+      window.removeEventListener('postsUpdated', handlePostsUpdated as EventListener);
+    };
+  }, []);
+
+  // Handle new post creation
+  const handlePostCreated = (newPost: Post) => {
+    // Refetch all posts from the blockchain instead of manually adding
+    reloadPostsList();
+    console.log("Posts refreshed after new post creation");
+  };
+
+  const reloadPostsList = () => {
+    const loadedPosts = GetWalletPDAs();
+    console.log("Loaded posts:", loadedPosts);
+    setPosts(loadedPosts);
+  }
+
+  // Handler for clicking the close button
+  const handleCloseClick = (e: MouseEvent) => {
+    e.stopPropagation();
+    toggleDisplayPostDisplay();
+  };
+
+  // Render messages when there are no posts
+  const NoPostsMessage = () => (
+    <div className="text-center p-10">
+      <h2 className="text-xl font-semibold mb-2">No Posts Found</h2>
+      <p className="mb-4">There are currently no posts on the blockchain.</p>
+      <p className="text-sm opacity-70">Click "Create Post" to add the first post!</p>
+    </div>
+  );
 
   return (
     <div className="z-10">
@@ -65,48 +110,51 @@ export default function Page() {
             />
           <button
             className="absolute flex w-full h-full bg-base-100 opacity-50 z-99" 
-            onClick={toggleDisplayPostDisplay}
+            onClick={handleCloseClick}
           />
         </> : <></>}
 
 {/* post display list starts here (popups above) */}
       
       <main className="h-screen w-full px-40 mt-5">
+        <div className="flex justify-between items-center mb-4">
+          <h1 className="text-2xl font-bold">Recent Posts</h1>
+          <button 
+            className="btn btn-primary"
+            onClick={toggleDisplayPostCreation}
+          >
+            Create Post
+          </button>
+          <button 
+            className="btn btn-primary"
+            onClick={reloadPostsList}
+          >
+            Reolad Posts
+          </button>
+        </div>
         <div>
           <ul className="list bg-base-100 rounded-box shadow-md"> 
             {/* Render posts from state if available */}
-            {posts.length > 0 && posts.map((post, index) => (
-              <li key={index} className="hover:bg-base-200">
-                <a href="#" className="list-row">
-                  <div></div>
+            {posts.length > 0 ? posts.map((post, index) => (
+              <li 
+                key={index} 
+                className="hover:bg-base-200 rounded-box shadow-md p-2 mb-2" 
+                onClick={() => toggleDisplayPostDisplay(post)}
+              >
+                  <div className="list-row cursor-pointer">
                   <div>
-                    <div className="uppercase font-semibold opacity-60">{post.title}</div>
-                    <div>{post.date}: {post.author}</div>
+                    <div className="uppercase font-semibold mb-2">{post.title}</div>
+                    <div className="uppercase opacity-70">{post.date} • Posted by: {post.author}</div>
                   </div>
                   <p className="list-col-wrap text-sm">{post.body}</p>
                   <div className="badge">{post.votes} votes</div>
-                </a>
+                  </div>
               </li>
-            ))}
-            {/* Original example post */}
-            <li className="hover:bg-base-200">
-              <a href="#" className="list-row">
-                <div></div>
-                <div>
-                  <div className="uppercase font-semibold opacity-60">Title</div>
-                  <div>12-30-2025: Author</div>
-                </div>
-                <p className="list-col-wrap text-sm">Body</p>
-                <div className="badge">0 votes</div>
-              </a>
-            </li>
+            )) : (
+              // Show this when no posts are available
+              <NoPostsMessage />
+            )}
           </ul>
-          <div className="absolute bottom-5 right-5">
-            <button className="btn btn-lg btn-primary" onClick={() => {toggleDisplayPostCreation(); console.log("click")}}>Create Post</button>
-          </div>
-          <div className="absolute bottom-20 right-5">
-            <button className="btn btn-lg btn-primary" onClick={toggleDisplayPostDisplay}>Display Post</button>
-          </div>
         </div>
       </main>
     </div>
