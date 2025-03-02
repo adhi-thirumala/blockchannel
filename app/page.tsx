@@ -5,7 +5,20 @@ import React from "react"
 import PostCreationPopup from "./components/PostCreation"
 import PostDisplayPopup from "./components/PostDisplay";
 import { Post, AccountData } from "./objects";
-import { GetWalletPDAs } from "./functions";
+import { GetWalletPDAs } from "./solana";
+import * as solanaTypes from "./solana";
+
+// Function to convert solana Post type to our app Post type
+const convertSolanaPostToAppPost = (solanaPost: solanaTypes.Post): Post => {
+  return {
+    title: solanaPost.title,
+    body: solanaPost.content,
+    date: new Date(solanaPost.createdAt * 1000).toDateString(), // Convert timestamp to readable date
+    author: solanaPost.creator,
+    votes: solanaPost.votes,
+    seed: solanaPost.id
+  };
+};
 
 export default function Page() {
   // State for showing/hiding post creation popup
@@ -39,10 +52,33 @@ export default function Page() {
   const [postToDisplay, setPostToDisplay] = useState(dummyPost);
 
   // Load posts when the component mounts
-  useEffect(() => {
-    const loadedPosts = GetWalletPDAs();
-    console.log("Initial load, posts:", loadedPosts);
-    setPosts(loadedPosts);
+  /* useEffect(() => {
+    // Handle async function
+    const fetchPosts = async () => {
+      try {
+        console.log("Fetching posts from blockchain...");
+        const solanaPosts = await GetWalletPDAs();
+        console.log("Initial load, posts:", solanaPosts);
+        
+        // Handle the case of no posts gracefully
+        if (!solanaPosts || solanaPosts.length === 0) {
+          
+          setPosts([]);
+          return;
+        }
+        
+        // Convert Solana posts to app posts
+        const appPosts = solanaPosts.map(convertSolanaPostToAppPost);
+        setPosts(appPosts);
+      } catch (error) {
+        console.error("Error loading posts:", error);
+        // Set an empty array to show the "No Posts" message
+        setPosts([]);
+        // You could also set some error state here to show an error message to the user
+      }
+    };
+    
+    fetchPosts();
 
     // Set up listener for post updates from blockchain
     const handlePostsUpdated = (event: CustomEvent<Post[]>) => {
@@ -57,19 +93,40 @@ export default function Page() {
     return () => {
       window.removeEventListener('postsUpdated', handlePostsUpdated as EventListener);
     };
-  }, []);
+  }, []); */
 
   // Handle new post creation
   const handlePostCreated = (newPost: Post) => {
     // Refetch all posts from the blockchain instead of manually adding
-    reloadPostsList();
+    setPosts([...posts, newPost]);
     console.log("Posts refreshed after new post creation");
   };
 
   const reloadPostsList = () => {
-    const loadedPosts = GetWalletPDAs();
-    console.log("Loaded posts:", loadedPosts);
-    setPosts(loadedPosts);
+    // Handle async function
+    const fetchPosts = async () => {
+      try {
+        console.log("Reloading posts from blockchain...");
+        const solanaPosts = await GetWalletPDAs();
+        console.log("Loaded posts:", solanaPosts);
+        
+        // Handle the case of no posts gracefully
+        if (!solanaPosts || solanaPosts.length === 0) {
+          console.log("No posts found or error occurred during reload - displaying empty state");
+          setPosts([]);
+          return;
+        }
+        
+        // Convert Solana posts to app posts
+        const appPosts = solanaPosts.map(convertSolanaPostToAppPost);
+        setPosts(appPosts);
+      } catch (error) {
+        console.error("Error reloading posts:", error);
+        // You could set some error state here to show an error message to the user
+      }
+    };
+    
+    fetchPosts();
   }
 
   // Handler for clicking the close button
@@ -106,6 +163,7 @@ export default function Page() {
           <PostDisplayPopup
             data={postToDisplay}
             onClose={toggleDisplayPostDisplay} 
+            IncrementLike={() => {postToDisplay.votes++;}}
             // onCommentCreated={handleCommentCreated} 
             />
           <button
@@ -125,12 +183,7 @@ export default function Page() {
           >
             Create Post
           </button>
-          <button 
-            className="btn btn-primary"
-            onClick={reloadPostsList}
-          >
-            Reolad Posts
-          </button>
+      
         </div>
         <div>
           <ul className="list bg-base-100 rounded-box shadow-md"> 

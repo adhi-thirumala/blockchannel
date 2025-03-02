@@ -1,8 +1,9 @@
 import * as web3 from '@solana/web3.js';
+import { PublicKey } from '@solana/web3.js';
 import * as borsh from 'borsh';
 import BN from 'bn.js';
 import { Buffer } from 'buffer';
-
+import bs58 from 'bs58';
 // Replace with your deployed program ID after deployment
 export const PROGRAM_ID = new web3.PublicKey('bWbGoUe1QUVfy2uUTcMgq8jrQjn6uHKzDr9EdwhNWtf');
 
@@ -18,6 +19,49 @@ export const connection = new web3.Connection(
     disableRetryOnRateLimit: false
   }
 );
+export class MyPdaData {
+  owner: PublicKey;
+  field1: string;
+  field2: string;
+  int32: number;
+  uint32: number;
+  uint64: bigint;
+  constructor(fields: {
+      owner: PublicKey;
+      field1: string;
+      field2: string;
+      int32: number;
+      uint32: number;
+      uint64: bigint;
+  }) {
+      this.owner = fields.owner;
+      this.field1 = fields.field1;
+      this.field2 = fields.field2;
+      this.int32 = fields.int32;
+      this.uint32 = fields.uint32;
+      this.uint64 = fields.uint64;
+  }
+}
+
+const MyPdaDataSchema = new Map([
+  [MyPdaData, {
+      kind: "struct",
+      fields: [
+          ["owner", [32]],
+          ["field1", "string"],
+          ["field2", "string"],
+          ["int32", "i32"],
+          ["uint32", "u32"],
+          ["uint64", "u64"],
+      ],
+  }],
+]);
+
+export function deserializePdaData(buffer: Buffer): MyPdaData {
+  const decoded = borsh.deserialize(MyPdaDataSchema, MyPdaData, buffer);
+  decoded.owner = new PublicKey(decoded.owner);
+  return decoded;
+}
 
 // Cost constants (in lamports)
 export const COSTS = {
@@ -304,12 +348,109 @@ export function serializeLikePostInstruction(postId: string): Buffer {
 // Helper function for Borsh deserialization
 function borshDeserialize(schema: any, buffer: Buffer): any {
   try {
+    // Validate input buffer
+    if (!buffer || buffer.length === 0) {
+      throw new Error('Empty buffer provided for deserialization');
+    }
+    
+    // Log first few bytes to help diagnose issues
+    const previewBytes = buffer.slice(0, Math.min(16, buffer.length));
+    console.log(`Deserializing buffer: First ${previewBytes.length} bytes: ${previewBytes.toString('hex')}`);
+    
+    // Add more detailed analysis for PostData schema specifically
+    if (schema === PostData.schema) {
+      // Try to analyze the first 50 bytes to see what's in the buffer
+      const analyzeBytes = buffer.slice(0, Math.min(50, buffer.length));
+      console.log(`PostData Buffer Analysis (first ${analyzeBytes.length} bytes):`);
+      
+      // Try to interpret the first 32 bytes as pubkey
+      if (buffer.length >= 32) {
+        try {
+          const pubkeyBytes = buffer.slice(0, 32);
+          const pubkey = new web3.PublicKey(pubkeyBytes);
+          console.log(`  Potential creator pubkey: ${pubkey.toString()}`);
+        } catch (e) {
+          console.log(`  First 32 bytes not a valid pubkey`);
+        }
+      }
+      
+      // Try to interpret bytes 32-36 as a string length
+      if (buffer.length >= 36) {
+        const stringLen = buffer.readUInt32LE(32);
+        console.log(`  Bytes 32-36 as uint32: ${stringLen} (potential string length)`);
+        
+        // If string length seems reasonable, try to decode as UTF-8
+        if (stringLen > 0 && stringLen < 1000 && buffer.length >= 36 + stringLen) {
+          const potentialString = buffer.slice(36, 36 + stringLen).toString('utf8');
+          console.log(`  Potential string at bytes 36-${36+stringLen}: "${potentialString.substring(0, 30)}${potentialString.length > 30 ? '...' : ''}"`);
+        }
+      }
+    }
+    
+    // Check for minimum expected buffer size based on schema
+    let minimumExpectedSize = 0;
+    
+    // Calculate rough minimum size for PostData schema
+    if (schema === PostData.schema) {
+      // Creator pubkey (32) + min sizes for title (4) + content (4) + numbers (4+4+8)
+      minimumExpectedSize = 32 + 4 + 4 + 16;
+      
+      if (buffer.length < minimumExpectedSize) {
+        console.warn(`Buffer likely too small for PostData schema: ${buffer.length} bytes < ${minimumExpectedSize} minimum`);
+      }
+    } else if (schema === CommentData.schema) {
+      // Min size for postId (4) + creator (32) + content (4) + createdAt (8)
+      minimumExpectedSize = 4 + 32 + 4 + 8;
+      
+      if (buffer.length < minimumExpectedSize) {
+        console.warn(`Buffer likely too small for CommentData schema: ${buffer.length} bytes < ${minimumExpectedSize} minimum`);
+      }
+    }
+    
     // The third parameter should be the class/type to instantiate
     // Since we're using custom schema objects, we'll pass the schema itself as the class
     const classType = schema.constructor || schema;
-    return borsh.deserialize(schema, buffer, classType);
+    
+    try {
+      const result = borsh.deserialize(schema, buffer, classType);
+      
+      // Check for reasonable values in the result to validate deserialization
+      if (schema === PostData.schema) {
+        const postData = result as PostData;
+        
+        // Simple validation
+        if (typeof postData.title !== 'string' || 
+            typeof postData.content !== 'string' ||
+            !postData.createdAt) {
+          console.warn('Deserialized PostData has invalid fields, might be incorrect schema');
+        }
+      }
+      
+      return result;
+    } catch (deserializeError: any) {
+      // Handle specific buffer size errors more gracefully
+      if (deserializeError.message && 
+         (deserializeError.message.includes('buffer is smaller than expected') || 
+          deserializeError.message.includes('assert_enough_buffer'))) {
+        // Extract information about where it failed
+        const match = deserializeError.stack?.match(/at (\w+)\.decode_(\w+)/);
+        const failedAt = match ? `${match[1]}.${match[2]}` : 'unknown location';
+        
+        throw new Error(`Buffer size error at ${failedAt}: Buffer length ${buffer.length} bytes is insufficient for schema`);
+      }
+      throw deserializeError;
+    }
   } catch (error: any) {
     console.error('Deserialization error:', error);
+    console.error('Buffer length:', buffer ? buffer.length : 'null');
+    
+    // More condensed schema representation
+    const schemaDesc = typeof schema === 'object' && schema !== null ? 
+      `Schema type: ${schema === PostData.schema ? 'PostData' : 
+                    schema === CommentData.schema ? 'CommentData' : 'Unknown'}` :
+      JSON.stringify(schema);
+    console.error(schemaDesc);
+    
     throw new Error(`Failed to deserialize data: ${error.message}`);
   }
 }
@@ -750,182 +891,276 @@ export async function createComment(
  * @returns Transaction signature
  */
 export async function likePost(
-  wallet: any,
+  walletInfo: any,
   postId: string,
-  postOwner: string
+  Owner: string,
+  title: string = "like",
+  content: string = "yes"
 ): Promise<string> {
-  try {
+    
     // Convert string IDs to PublicKey objects
-    const postPubkey = new web3.PublicKey(postId);
-    const postOwnerPubkey = new web3.PublicKey(postOwner);
-    
-    // Create transaction
-    const transaction = new web3.Transaction();
-    
-    // Create transfer instruction for like fee
-    const transferIx = web3.SystemProgram.transfer({
-      fromPubkey: wallet.publicKey,
-      toPubkey: postOwnerPubkey,
-      lamports: COSTS.LIKE_POST,
-    });
-    
-    // Create like post instruction
-    const likePostIx = new web3.TransactionInstruction({
-      keys: [
-        { pubkey: wallet.publicKey, isSigner: true, isWritable: true },
-        { pubkey: postPubkey, isSigner: false, isWritable: true },
-        { pubkey: postOwnerPubkey, isSigner: false, isWritable: true },
-        { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
-      ],
-      programId: PROGRAM_ID,
-      data: serializeLikePostInstruction(postId),
-    });
-    
-    // Add instructions to transaction
-    transaction.add(transferIx);
-    transaction.add(likePostIx);
-    
-    // Get recent blockhash
-    const { blockhash } = await connection.getLatestBlockhash('confirmed');
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = wallet.publicKey;
-    
-    // Handle different wallet types
-    let signature: string;
-    
-    console.log('Attempting to sign transaction...');
+    // const postPubkey = new web3.PublicKey(bs58.encode(Buffer.from(postId, 'base64')).toString());
+    const publicKey = new web3.PublicKey('8kn1UgmqaKJ3dtzz4v9ur67USarDVW3utoVN1d6Duk1x');
+    const postOwnerPubkey = new web3.PublicKey('8kn1UgmqaKJ3dtzz4v9ur67USarDVW3utoVN1d6Duk1x');
     try {
-      // Handle wallet adapter from @solana/wallet-adapter-react
-      if (wallet.adapter && typeof wallet.adapter.signTransaction === 'function') {
-        console.log('Using wallet adapter signTransaction');
-        const signedTx = await wallet.adapter.signTransaction(transaction);
-        signature = await connection.sendRawTransaction(signedTx.serialize());
+      // Validate that wallet has a publicKey
+      if (!walletInfo.publicKey) {
+        throw new Error("Transaction fee payer required");
       }
-      // Check for direct signTransaction method
-      else if (typeof wallet.signTransaction === 'function') {
-        console.log('Using wallet signTransaction directly');
-        const signedTx = await wallet.signTransaction(transaction);
-        signature = await connection.sendRawTransaction(signedTx.serialize());
-      }
-      // Handle sendTransaction method (common in newer wallet adapters)
-      else if (wallet.adapter && typeof wallet.adapter.sendTransaction === 'function') {
-        console.log('Using wallet adapter sendTransaction');
-        signature = await wallet.adapter.sendTransaction(transaction, connection);
-      }
-      // Check for direct sendTransaction method
-      else if (typeof wallet.sendTransaction === 'function') {
-        console.log('Using wallet sendTransaction directly');
-        signature = await wallet.sendTransaction(transaction, connection);
-      }
-      // Check if it's a Keypair (unlikely in browser but possible in Node environment)
-      else if (wallet instanceof web3.Keypair) {
-        console.log('Using keypair signing');
-        transaction.sign(wallet);
-        signature = await connection.sendRawTransaction(transaction.serialize());
-      }
-      // If we don't have any supported signing method
-      else {
-        console.error('No valid signing method found on wallet:', wallet);
-        throw new Error('Wallet must have ability to sign transactions');
+  
+      console.log("Creating post with wallet:", JSON.stringify({
+        hasPublicKey: !!walletInfo.publicKey,
+        hasAdapter: !!walletInfo.adapter,
+        adapterName: walletInfo.adapter?.name,
+        connected: walletInfo.adapter?.connected,
+        readyState: walletInfo.adapter?.readyState
+      }));
+      
+      // Extract publicKey from wallet
+      let publicKeyObj;
+      
+      // Handle different wallet types
+      if (walletInfo.publicKey) {
+        // Direct publicKey property (standard case)
+        publicKeyObj = walletInfo.publicKey;
+      } else if (walletInfo.adapter && walletInfo.adapter.publicKey) {
+        // Wallet adapter case
+        publicKeyObj = walletInfo.adapter.publicKey;
+      } else {
+        console.error("Invalid wallet object:", walletInfo);
+        throw new Error("Transaction fee payer required - wallet must have a publicKey");
       }
       
-      console.log('Transaction sent successfully with signature:', signature);
-    } catch (err: any) {
-      console.error("Error during transaction signing/sending:", err);
-      let errorMessage = "Failed to sign/send transaction with wallet";
-      if (err.message) {
-        errorMessage += `: ${err.message}`;
-      }
-      throw new Error(errorMessage);
-    }
-    
-    await connection.confirmTransaction(signature);
-    
-    return signature;
-  } catch (error: unknown) {
-    console.error('Error liking post:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    throw new Error(`Failed to like post: ${errorMessage}`);
-  }
-}
-
-/**
- * Type definition for a post
- */
-export interface Post {
-  id: string;
-  title: string;
-  content: string;
-  creator: string;
-  votes: number;
-  commentCount: number;
-  createdAt: number;
-}
-
-/**
- * Type definition for a comment
- */
-export interface Comment {
-  id: string;
-  postId: string;
-  creator: string;
-  content: string;
-  createdAt: number;
-}
-
-/**
- * Fetch all posts from the blockchain
- * @param sortBy Sort method - 'recent' or 'votes'
- * @returns Array of posts
- */
-export async function fetchPosts(sortBy: 'recent' | 'votes' = 'recent'): Promise<Post[]> {
-  try {
-    // Get all program accounts
-    const accounts = await connection.getProgramAccounts(PROGRAM_ID);
-    
-    // Process accounts to identify and parse posts
-    const posts: Post[] = [];
-    
-    for (const account of accounts) {
+      // Convert publicKey to proper PublicKey object if it's a string
+      const publicKey = typeof publicKeyObj === 'string' 
+        ? new web3.PublicKey(publicKeyObj)
+        : publicKeyObj;
+        
+      // Use the connection provided with the wallet if available, otherwise use the default connection
+      const currentConnection = walletInfo.connection || connection;
+      console.log("Using connection with endpoint:", currentConnection.rpcEndpoint || "default");
+      
+      // Generate a unique seed for this post - for client-side tracking only
+      const postSeed = generatePostAccountSeed();
+      console.log("Generated unique post seed:", postSeed);
+      
+      // Create a new keypair for the post account with identifiable log
+      const postAccount = web3.Keypair.generate();
+      console.log("Generated post account:", postAccount.publicKey.toString(), "with seed:", postSeed);
+      
+      // Create transaction
+      const transaction = new web3.Transaction();
+      
+      // Create transfer instruction for post creation fee
+      const transferIx = web3.SystemProgram.transfer({
+        fromPubkey: publicKey,
+        toPubkey: FEE_WALLET,
+        lamports: COSTS.CREATE_POST,
+      });
+      
+      // Create post instruction
+      const instructionData = serializeCreatePostInstruction("like", "yes");
+      console.log("Instruction data length:", instructionData.length, "bytes");
+      
+      // Log account details for better debugging
+      console.log("Accounts configuration for createPostIx:");
+      console.log("- User/Signer:", publicKey.toString());
+      console.log("- Post Account:", postAccount.publicKey.toString(), "(isSigner: true - REQUIRED for program to create it)");
+      console.log("- System Program:", web3.SystemProgram.programId.toString());
+      console.log("- Fee Wallet:", FEE_WALLET.toString());
+      
+      const createPostIx = new web3.TransactionInstruction({
+        keys: [
+          // The user is the fee payer and the one creating the post
+          { pubkey: publicKey, isSigner: true, isWritable: true },
+          
+          // Post account MUST be a signer because the program is going to create it
+          // The program uses SystemProgram.createAccount which requires the new account to sign
+          { pubkey: postAccount.publicKey, isSigner: true, isWritable: true },
+          
+          // System program for the inner create account call in the Rust program
+          { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+          
+          // Fee wallet to receive the post creation fee
+          { pubkey: FEE_WALLET, isSigner: false, isWritable: true },
+        ],
+        programId: PROGRAM_ID,
+        data: instructionData,
+      });
+      
+      // Add instructions to transaction - note we're removing the createAccountIx
+      // since the Rust program will handle creating the account
+      transaction.add(transferIx);
+      transaction.add(createPostIx);
+      
+      console.log("Transaction instructions added:", transaction.instructions.length);
+      
+      // Get latest blockhash with retry mechanism
+      let blockhash;
       try {
-        // Skip accounts that are too small to be posts
-        if (account.account.data.length < 50) continue;
-        
-        // Try to parse as post data
-        // This is a simplified approach - in production you'd need more robust differentiation between post and comment accounts
-        const data = Buffer.from(account.account.data);
-        
-        // Skip first 8 bytes (account discriminator)
-        const postData = borshDeserialize(PostData.schema, data.slice(8)) as PostData;
-        
-        posts.push({
-          id: account.pubkey.toString(),
-          title: postData.title,
-          content: postData.content,
-          creator: new web3.PublicKey(postData.creator).toString(),
-          votes: postData.votes,
-          commentCount: postData.commentCount,
-          createdAt: postData.createdAt.toNumber(),
-        });
-      } catch (error: unknown) {
-        // Skip accounts that fail to parse as posts
-        continue;
+        const { blockhash: latestBlockhash } = await currentConnection.getLatestBlockhash('finalized');
+        blockhash = latestBlockhash;
+        console.log("Got blockhash:", blockhash);
+      } catch (err) {
+        console.error("Error getting blockhash, retrying...", err);
+        // Retry once after a short delay
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        const { blockhash: retryBlockhash } = await currentConnection.getLatestBlockhash('finalized');
+        blockhash = retryBlockhash;
       }
+      
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = publicKey;
+      
+      // Sign with post account - this is now critical since the post account needs to sign
+      // for the Rust program to create it
+      transaction.partialSign(postAccount);
+      console.log("Transaction partially signed with post account");
+      console.log("Transaction has", transaction.signatures.length, "signatures");
+      
+      // Log detailed transaction information
+      console.log("Transaction fee payer:", transaction.feePayer?.toString());
+      console.log("Transaction blockhash:", transaction.recentBlockhash);
+      console.log("Transaction instructions:", transaction.instructions.map(ix => ix.programId.toString()));
+      
+      // This part is critical - let's try the direct approach first
+      let signature: string;
+      let rawErrorMessage: string = '';
+  
+      console.log('Available wallet methods:', Object.keys(walletInfo).join(', '), 
+                  walletInfo.adapter ? `Adapter methods: ${Object.keys(walletInfo.adapter).join(', ')}` : '');
+      
+      try {
+        // SOLFLARE SPECIFIC APPROACH
+        const wallet = walletInfo.adapter || walletInfo;
+        console.log(`Attempting to sign transaction with wallet adapter: ${wallet.name || 'Unknown'}`);
+        console.log("Instruction data details:", {
+          instructionType: InstructionType.CreatePost,
+          titleLength: title.length,
+          contentLength: content.length,
+        });
+  
+        // Special handling for Solflare and other wallets that prefer signTransaction over sendTransaction
+        if (wallet.name === 'Solflare' || wallet.name === 'Phantom') {
+          console.log('Using Solflare/Phantom specific signing approach');
+          
+          // First, serialize the transaction after partial signing with post account
+          const serializedTransaction = transaction.serialize({
+            requireAllSignatures: false,
+            verifySignatures: false
+          });
+          
+          // Create a new Transaction object from the serialized transaction
+          const newTransaction = web3.Transaction.from(serializedTransaction);
+          
+          // Sign the new transaction with the wallet
+          const signedTransaction = await wallet.signTransaction(newTransaction);
+          
+          // Send the fully signed transaction
+          console.log("About to send transaction with both wallet and post account signatures");
+          signature = await currentConnection.sendRawTransaction(signedTransaction.serialize());
+          console.log('Transaction signed and sent successfully:', signature);
+        }
+        // For other wallets, try sendTransaction directly
+        else if (typeof wallet.sendTransaction === 'function') {
+          console.log('Using adapter.sendTransaction method');
+          signature = await wallet.sendTransaction(transaction, currentConnection);
+          console.log('Transaction sent with signature:', signature);
+        }
+        // Fallback to standard signTransaction approach
+        else if (typeof wallet.signTransaction === 'function') {
+          console.log('Using standard wallet signTransaction');
+          const signedTx = await wallet.signTransaction(transaction);
+          signature = await currentConnection.sendRawTransaction(signedTx.serialize());
+          console.log('Transaction sent with signature:', signature);
+        }
+        else {
+          throw new Error('No compatible wallet method found. The wallet must support sendTransaction or signTransaction.');
+        }
+      } catch (err: any) {
+        // Save the raw error for debugging
+        rawErrorMessage = err.message || String(err);
+        console.error('DETAILED ERROR:', err);
+        console.error('Error raw message:', rawErrorMessage);
+        console.error('Error object keys:', Object.keys(err).join(', '));
+        
+        // Rethrow with original error to preserve error handling
+        throw err;
+      }
+      
+      // Confirm transaction with increased timeout and better handling
+      console.log("Waiting for transaction confirmation...");
+      try {
+        const confirmation = await currentConnection.confirmTransaction({
+          signature,
+          blockhash,
+          lastValidBlockHeight: (await currentConnection.getBlockHeight()) + 150
+        }, 'confirmed');
+        
+        // Check for timeout or failure
+        if (confirmation.value.err) {
+          throw new Error(`Transaction confirmed but has errors: ${JSON.stringify(confirmation.value.err)}`);
+        }
+        
+        console.log("Transaction confirmed successfully");
+      } catch (err: any) {
+        console.error("Error confirming transaction:", err);
+        
+        // Check if transaction was actually successful despite confirmation error
+        try {
+          const signatureStatus = await currentConnection.getSignatureStatus(signature);
+          if (signatureStatus.value && signatureStatus.value.confirmationStatus === 'confirmed') {
+            console.log("Transaction actually confirmed despite confirmation error");
+            // Transaction succeeded, continue
+          } else {
+            throw new Error(`Transaction may have failed: ${err.message}`);
+          }
+        } catch (statusErr) {
+          throw new Error(`Failed to confirm transaction: ${err.message}`);
+        }
+      }
+      
+      // Log the post ID and associated seed for future reference
+      console.log(`Post created with ID: ${postAccount.publicKey.toString()}, Seed: ${postSeed}`);
+      
+      return {
+        signature,
+        postId: postAccount.publicKey.toString(),
+        seed: postSeed // Include the seed in the response for client-side traceability
+      };
+    } catch (error: any) {
+      console.error('Error creating post:', error);
+      
+      // Enhanced error reporting
+      let errorMsg = 'Failed to create post';
+      const rawError = error.message || String(error);
+      
+      // Common wallet errors
+      if (rawError.includes('cancelled') || rawError.includes('canceled') || rawError.includes('rejected') || 
+          rawError.includes('reject') || rawError.includes('user rejected')) {
+        errorMsg = 'Transaction was cancelled by the wallet. Please try again and approve the transaction promptly.';
+      }
+      // Timeout errors
+      else if (rawError.includes('timeout') || rawError.includes('timed out')) {
+        errorMsg = 'Transaction timed out. Please check your wallet and internet connection, then try again.';
+      }
+      // Network errors
+      else if (rawError.includes('network') || rawError.includes('connection')) {
+        errorMsg = 'Network error while processing transaction. Please check your internet connection and try again.';
+      }
+      // Insufficient funds
+      else if (rawError.includes('insufficient') || rawError.includes('funds')) {
+        errorMsg = 'Insufficient funds to complete the transaction. Please add more SOL to your wallet.';
+      }
+      // Method not found errors
+      else if (rawError.includes('is not a function') || rawError.includes('method not found')) {
+        errorMsg = 'Your wallet does not support the required transaction methods. Please try a different wallet.';
+      }
+      // Add raw error for debugging
+      errorMsg += ` (Debug: ${rawError})`;
+      
+      throw new Error(errorMsg);
     }
-    
-    // Sort posts
-    if (sortBy === 'recent') {
-      posts.sort((a, b) => b.createdAt - a.createdAt);
-    } else {
-      posts.sort((a, b) => b.votes - a.votes);
-    }
-    
-    return posts;
-  } catch (error: unknown) {
-    console.error('Error fetching posts:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    throw new Error(`Failed to fetch posts: ${errorMessage}`);
-  }
 }
 
 /**
@@ -1017,46 +1252,72 @@ export async function requestAirdrop(publicKey: web3.PublicKey, amount: number):
 }
 
 /**
- * Function to get all posts associated with the connected wallet
- * This fetches all posts where the connected wallet is the creator
+ * Function to get all posts associated with the connected wallet or all posts if no wallet is provided
+ * @param walletPublicKey Optional wallet public key to filter posts by creator
  * @returns Promise resolving to an array of Post objects
  */
 export async function GetWalletPDAs(walletPublicKey?: web3.PublicKey): Promise<Post[]> {
   try {
-    // Get all program accounts
-    const accounts = await connection.getProgramAccounts(PROGRAM_ID);
+    console.log("Fetching program accounts from blockchain...");
     
-    // Process accounts to identify and parse posts created by the connected wallet
+    // Get all program accounts with raw data
+    const accounts = await connection.getProgramAccounts(PROGRAM_ID, {
+      commitment: 'confirmed',
+    });
+    
+    console.log(`Retrieved ${accounts.length} total program accounts`);
+    
+    // Array to store the parsed posts
     const posts: Post[] = [];
     
-    for (const account of accounts) {
+    // Process each account
+    for (const { pubkey, account } of accounts) {
       try {
-        // Skip accounts that are too small to be posts
-        if (account.account.data.length < 50) continue;
-        
-        // Try to parse as post data
-        const data = Buffer.from(account.account.data);
-        
-        // Skip first 8 bytes (account discriminator)
-        const postData = borshDeserialize(PostData.schema, data.slice(8)) as PostData;
-        
-        // Only include posts created by the specified wallet
-        // If no wallet is provided, return all posts (same as fetchPosts)
-        const creatorPubkey = new web3.PublicKey(postData.creator);
-        
-        if (!walletPublicKey || creatorPubkey.equals(walletPublicKey)) {
-          posts.push({
-            id: account.pubkey.toString(),
-            title: postData.title,
-            content: postData.content,
-            creator: creatorPubkey.toString(),
-            votes: postData.votes,
-            commentCount: postData.commentCount,
-            createdAt: postData.createdAt.toNumber(),
-          });
+        // Skip accounts with insufficient data
+        if (account.data.length < 44) { // 8 bytes discriminator + 32 bytes pubkey + min 4 bytes
+          continue;
         }
-      } catch (error: unknown) {
-        // Skip accounts that fail to parse as posts
+        
+        // Log the discriminator for debugging
+        const discriminator = Buffer.from(account.data.slice(0, 8)).toString('hex');
+        console.log(`Account ${pubkey.toString()} discriminator: ${discriminator}`);
+        
+        // Remove the 8-byte discriminator
+        const dataWithoutDiscriminator = account.data.slice(8);
+        
+        try {
+          // Use the existing deserializePdaData function
+          const pdaData = deserializePdaData(Buffer.from(dataWithoutDiscriminator));
+          
+          // Create a PublicKey from the owner field
+          const creatorPubkey = pdaData.owner;
+          
+          // If wallet filter is applied, skip non-matching accounts
+          if (walletPublicKey && !creatorPubkey.equals(walletPublicKey)) {
+            continue;
+          }
+          
+          // Map the PDA data to our Post interface
+          // Note: We're using field1 as title and field2 as content
+          // Adjust accordingly based on your actual data structure
+          posts.push({
+            id: pubkey.toString(),
+            title: pdaData.field1,
+            content: pdaData.field2,
+            creator: creatorPubkey.toString(),
+            votes: pdaData.int32,
+            commentCount: pdaData.uint32,
+            createdAt: Number(pdaData.uint64),
+          });
+          
+          console.log(`Successfully parsed post: ${pdaData.field1}`);
+        } catch (e) {
+          // This account could not be parsed as a post, likely a different account type
+          console.log(`Account ${pubkey.toString()} failed to parse: ${e instanceof Error ? e.message : 'Unknown error'}`);
+          continue;
+        }
+      } catch (error) {
+        console.log(`Failed to process account ${pubkey.toString()}: ${error instanceof Error ? error.message : 'Unknown error'}`);
         continue;
       }
     }
@@ -1064,9 +1325,14 @@ export async function GetWalletPDAs(walletPublicKey?: web3.PublicKey): Promise<P
     // Sort posts by creation time (newest first)
     posts.sort((a, b) => b.createdAt - a.createdAt);
     
+    console.log(`Successfully parsed ${posts.length} posts ${walletPublicKey ? 'for the specified wallet' : 'across all wallets'}`);
+    
     return posts;
-  } catch (error: unknown) {
-    console.error('Error fetching wallet posts:', error);
-    return []; // Return empty array on error to prevent app crashes
+  } catch (error) {
+    console.error('Error in GetWalletPDAs:', error);
+    console.error('Stack trace:', error instanceof Error ? error.stack : 'No stack trace available');
+    
+    // Return empty array rather than throwing to prevent application crashes
+    return [];
   }
 }

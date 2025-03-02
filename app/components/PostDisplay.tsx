@@ -9,9 +9,10 @@ interface CommentCreationProps {
   data: AccountData;
   onClose: () => void;
   onCommentCreated?: (post: AccountData) => void;
+  IncrementLike: () => void;
 }
 
-export default function PostDisplayPopup({ onClose, onCommentCreated, data }:  CommentCreationProps) {
+export default function PostDisplayPopup({ onClose, onCommentCreated, data, IncrementLike }:  CommentCreationProps) {
   const { publicKey, wallet, connected } = useWallet();
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
@@ -20,6 +21,7 @@ export default function PostDisplayPopup({ onClose, onCommentCreated, data }:  C
   const [postStatus, setPostStatus] = useState<'idle' | 'validating' | 'confirming' | 'confirming-wallet' | 'processing' | 'success' | 'error'>('idle');
   const [transactionTimeoutId, setTransactionTimeoutId] = useState<NodeJS.Timeout | null>(null);
   const [likeStatus, setLikeStatus] = useState<'idle' | 'processing' | 'success' | 'error'>('idle');
+  const [commentContent, setCommentContent] = useState("");
 
   // Clear errors when input changes
     useEffect(() => {
@@ -188,84 +190,45 @@ export default function PostDisplayPopup({ onClose, onCommentCreated, data }:  C
 
   // Function to handle liking the post
   const handleLikePost = async () => {
-    // Verify wallet connection
     if (!connected || !publicKey || !wallet) {
-      setErrors({
-        general: 'Please connect your wallet first'
-      });
+      alert("Please connect your wallet first");
       return;
     }
-    
-    // Don't allow multiple like attempts at once
-    if (likeStatus === 'processing') return;
-    
-    setLikeStatus('processing');
-    
-    try {
-      // Create a wallet object for the transaction
-      const walletForTransaction = {
-        adapter: wallet.adapter,
-        publicKey: publicKey
-      };
-      
-      // Check if post has a seed/ID
-      if (!data.seed) {
-        throw new Error('Cannot like this post: missing post ID');
-      }
-      
-      // Call the likePost function from solana.ts
-      await likePost(
-        walletForTransaction,
-        data.seed,
-        data.author
-      );
-      
-      // Update status on success
-      setLikeStatus('success');
-      
-      // If there's a callback for updating the post data, call it
-      if (onCommentCreated) {
-        // Create an updated post with incremented votes
-        const updatedPost = {
-          ...data,
-          votes: data.votes + 1
+        // Create a wallet object that combines all necessary properties
+        const walletForTransaction = {
+          // Include the wallet's adapter for transaction signing
+          adapter: wallet.adapter,
+          // Make sure the publicKey is directly accessible
+          publicKey: publicKey
         };
-        onCommentCreated(updatedPost);
-      }
-      
-      // Reset the status after a delay
-      setTimeout(() => {
-        setLikeStatus('idle');
-      }, 2000);
-      
+
+    setLikeStatus("processing");
+    try {
+      await likePost(walletForTransaction, "8kn1UgmqaKJ3dtzz4v9ur67USarDVW3utoVN1d6Duk1x", "8kn1UgmqaKJ3dtzz4v9ur67USarDVW3utoVN1d6Duk1x");
+      setLikeStatus("success");
+      IncrementLike();
+      // Update local storage or state as needed
     } catch (error) {
-      console.error('Error liking post:', error);
-      
-      let errorMsg = 'Failed to like post';
-      
-      if (error instanceof Error) {
-        errorMsg = error.message;
-        
-        // Specific error handling for common issues
-        if (errorMsg.includes('cancelled') || errorMsg.includes('canceled') || errorMsg.includes('rejected')) {
-          errorMsg = 'Transaction was cancelled by your wallet.';
-        } else if (errorMsg.includes('insufficient funds')) {
-          errorMsg = 'Insufficient funds in your wallet to like this post.';
-        }
-      }
-      
-      setErrors({
-        general: errorMsg
-      });
-      setLikeStatus('error');
-      
-      // Reset the status after a delay
-      setTimeout(() => {
-        setLikeStatus('idle');
-      }, 3000);
+      console.error("Error liking post:", error);
+      setLikeStatus("idle");
     }
   };
-  
+
+  const handleCommentSubmit = async () => {
+    if (!connected || !publicKey || !wallet) {
+      alert("Please connect your wallet first");
+      return;
+    }
+
+    try {
+      await createComment(wallet, data.seed, commentContent);
+      setCommentContent("");
+      // Optionally refresh comments or update local storage
+    } catch (error) {
+      console.error("Error creating comment:", error);
+    }
+  };
+
   // Add a like button to the UI
   const renderLikeButton = () => {
     let buttonText = 'Like Post';
@@ -286,7 +249,7 @@ export default function PostDisplayPopup({ onClose, onCommentCreated, data }:  C
     return (
       <button 
         className={buttonClass} 
-        onClick={handleLikePost}
+        onClick={() => {handleLikePost();}}
         disabled={disabled || !connected}
       >
         {buttonText}
@@ -336,8 +299,8 @@ return (
           <textarea 
             className={`textarea h-70 my-3 w-full ${errors.content ? 'textarea-error' : ''}`} 
             placeholder="Share your thoughts"
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
+            value={commentContent}
+            onChange={(e) => setCommentContent(e.target.value)}
             disabled={isSubmitting}
           ></textarea>
           {errors.content && <p className="text-error text-xs mt-1">{errors.content}</p>}
@@ -398,9 +361,6 @@ return (
           )}
       </form>
 
-            <div className="card-actions justify-center mt-5">
-                <button className="btn btn-primary">Comment</button>
-            </div>
         </div>
     </div>
     </div>
